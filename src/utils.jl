@@ -872,6 +872,16 @@ end
 - `inc_tol_dp_abs=Inf`: Maximum allowable pressure change (absolute)
 - `inc_tol_dp_rel=Inf`: Maximum allowable pressure change (absolute)
 - `inc_tol_dz=Inf`: Maximum allowable composition change (compositional only).
+## Well logging options
+- `log_wells=Symbol[]`: Wells to log. Provide a vector of well names as `Symbol`s.
+    eg.(log_wells=[:Injector]) 
+- `log_wells_vars=Symbol[]`: Variables to log for each well (e.g. `[:Pressure, :Temperature]`).
+- `log_file_pth=nothing`: Path to the CSV file where logs are written,.  
+    (e.g. ``log_file_pth = "C:/Users/data/well_log.csv"``).
+    If not provided, defaults to `joinpath(output_path, "well_log.csv")` when `output_path` is given.
+    These options enable lightweight well logging at each solver mini-step, writing only well data
+    to a CSV file (instead of storing the full reservoir state).
+
 
 ## Inherited keyword arguments
 
@@ -1057,6 +1067,10 @@ function setup_reservoir_simulator(case::JutulCase;
         inc_tol_dp_rel = inc_tol_dp_rel,
         inc_tol_dz = inc_tol_dz
         )
+
+    add_option!(cfg, :log_wells, Symbol[], "Wells to log", types = Vector{Symbol})
+    add_option!(cfg, :log_wells_vars, Symbol[], "Variables to log per well", types = Vector{Symbol})
+    add_option!(cfg, :log_file_pth, nothing, "Output file for well logs", types = Union{String, Nothing})
     return (sim, cfg)
 end
 
@@ -1097,6 +1111,13 @@ result = simulate_reservoir(state0, model, dt, output_path = "/some/path", resta
 # Start from the beginning (default)
 result = simulate_reservoir(state0, model, dt, output_path = "/some/path", restart = false)
 ```
+# Keyword of logging well data
+- `log_wells=Symbol[]`: Wells to log.
+- `log_wells_vars=Symbol[]`: Variables to log per well.
+- `log_file_pth=nothing`: Path for the CSV output file.  
+   If `nothing`, defaults to `output_path/well_log.csv` when `output_path` is set.  
+   Example: `log_file_pth = "C:/Users/data/well_log.csv"`
+
 
 """
 function simulate_reservoir(state0, model, dt;
@@ -1112,6 +1133,9 @@ function simulate_reservoir(case::JutulCase;
         config = missing,
         restart = false,
         simulator = missing,
+        log_wells = Symbol[],
+        log_wells_vars = Symbol[],
+        log_file_pth = nothing,
         kwarg...
     )
     (; model, forces, state0, parameters, dt) = case
@@ -1133,7 +1157,18 @@ function simulate_reservoir(case::JutulCase;
         extra_arg = (state0 = case.state0, parameters = case.parameters)
         @assert !ismissing(config) "If simulator is provided, config must also be provided"
     end
-    result = simulate!(sim, dt; forces = forces, config = config, restart = restart, extra_arg...)
+
+    result = simulate!(sim, dt;
+        forces = forces,
+        config = config,
+        restart = restart,
+        log_wells = log_wells,
+        log_wells_vars = log_wells_vars,
+        log_file_pth = log_file_pth,
+        extra_arg...
+    )
+
+
     return ReservoirSimResult(model, result, forces; simulator = sim, config = config)
 end
 
