@@ -872,6 +872,16 @@ end
 - `inc_tol_dp_abs=Inf`: Maximum allowable pressure change (absolute)
 - `inc_tol_dp_rel=Inf`: Maximum allowable pressure change (absolute)
 - `inc_tol_dz=Inf`: Maximum allowable composition change (compositional only).
+## Well logging options
+- `log_wells=Symbol[]`: Wells to log. Provide a vector of well names as `Symbol`s.
+    eg.(log_wells=[:Injector]) 
+- `log_wells_vars=Symbol[]`: Variables to log for each well (e.g. `[:Pressure, :Temperature]`).
+- `log_file_pth=nothing`: Path to the CSV file where logs are written,.  
+    (e.g. ``log_file_pth = "C:/Users/data/well_log.csv"``).
+    If not provided, defaults to `joinpath(output_path, "well_log.csv")` when `output_path` is given.
+    These options enable lightweight well logging at each solver mini-step, writing only well data
+    to a CSV file (instead of storing the full reservoir state).
+
 
 ## Inherited keyword arguments
 
@@ -1047,6 +1057,10 @@ function setup_reservoir_simulator(case::JutulCase;
         max_timestep_cuts = max_timestep_cuts,
         kwarg...
     )
+
+    add_option!(cfg, :log_wells, Symbol[], "Wells to log", types = Vector{Symbol})
+    add_option!(cfg, :log_file_pth, nothing, "Output file for well logs", types = Union{String, Nothing})
+
     set_default_cnv_mb!(cfg, sim,
         tol_cnv = tol_cnv,
         tol_mb = tol_mb,
@@ -1098,6 +1112,12 @@ result = simulate_reservoir(state0, model, dt, output_path = "/some/path", resta
 result = simulate_reservoir(state0, model, dt, output_path = "/some/path", restart = false)
 ```
 
+# Keyword of logging well data
+- `log_wells=Symbol[]`: Wells to log.
+- `log_wells_vars=Symbol[]`: Variables to log per well.
+- `log_file_pth=nothing`: Path for the CSV output file.  
+   If `nothing`, defaults to `output_path/well_log.csv` when `output_path` is set.  
+   Example: `log_file_pth = "C:/Users/data/well_log.csv"`
 """
 function simulate_reservoir(state0, model, dt;
         parameters = setup_parameters(model),
@@ -1112,6 +1132,8 @@ function simulate_reservoir(case::JutulCase;
         config = missing,
         restart = false,
         simulator = missing,
+        log_wells = Symbol[],
+        log_file_pth = nothing,
         kwarg...
     )
     (; model, forces, state0, parameters, dt) = case
@@ -1133,9 +1155,156 @@ function simulate_reservoir(case::JutulCase;
         extra_arg = (state0 = case.state0, parameters = case.parameters)
         @assert !ismissing(config) "If simulator is provided, config must also be provided"
     end
+
+    # 装配 hook（如果用户请求了日志）
+    logger_io = nothing
+    if !isempty(log_wells)
+        if log_wells isa Symbol
+            log_wells = [log_wells]
+        end
+        if log_file_pth === nothing
+            output_path = config[:output_path]
+            output_path === nothing && error("You enabled well logging, but did not provide log_file_pth or config[:output_path].")
+            log_file_pth = joinpath(output_path, "well_log.csv")
+        end
+        append_mode = (restart != false)   # 重启时续写而不覆盖
+        well_logger, logger_io = well_logger_factory(
+            model, log_wells;
+            filepath = log_file_pth,
+            append   = append_mode,
+            # 可选：只要部分变量时解开下面一行
+            # vars_filter = [:TotalSurfaceMassRate, :Pressure]
+        )
+        config[:post_ministep_hook] = make_well_log_hook(well_logger)
+    end
+
     result = simulate!(sim, dt; forces = forces, config = config, restart = restart, extra_arg...)
+    if @isdefined(logger_io) && logger_io !== nothing
+        close(logger_io)
+    end
     return ReservoirSimResult(model, result, forces; simulator = sim, config = config)
 end
+
+
+
+
+import Jutul: get_output_state, progress_recorder, recorder_current_time
+
+# 读取 CSV 最后一行 t_global 作为偏移（若续写）
+function _last_t_from_csv(path::AbstractString)
+    if !isfile(path); return 0.0; end
+    t = 0.0
+    open(path, "r") do io
+        last = ""
+        for line in eachline(io)
+            last = line
+        end
+        if !isempty(last)
+            parts = split(last, ',')
+            # 假设第一列就是 t_global（表头不计）
+            if length(parts) > 0 && parts[1] != "t_global"
+                try
+                    t = parse(Float64, parts[1])
+                catch
+                    t = 0.0
+                end
+            end
+        end
+    end
+    return t
+end
+
+function well_logger_factory(
+    model,
+    log_wells::Vector{Symbol};
+    filepath::AbstractString,
+    append::Bool=false
+)
+    mode = (append && isfile(filepath)) ? "a" : "w"
+    io = open(filepath, mode)
+
+    # 追加模式下，从旧 CSV 取最后的时间做偏移，让 t_global 连续
+    t_offset = (mode == "a") ? _last_t_from_csv(filepath) : 0.0
+
+    header_written = (mode == "a")   # 续写：认为已有表头
+    col_order = Vector{Tuple{Symbol,Symbol}}()  # [(well, var), ...]
+
+    # 额外直接提取的变量（来自 state_now）
+    extra_vars = [:FluidEnthalpy, :Saturations]
+
+    logger = function (t_global::Real, state_now, forces_step)
+        # 取井数据（单状态）
+        wm = full_well_outputs(model, [state_now], forces_step)
+
+        # 首次真正写表头
+        if !header_written
+            headers = String["t_global"]
+            empty!(col_order)
+            for w in log_wells
+                if haskey(wm, w)
+                    for k in sort!(collect(keys(wm[w])); by=string)
+                        push!(headers, string(w, "_", k))
+                        push!(col_order, (w, k))
+                    end
+                end
+                # 加上 extra_vars 的列名
+                if haskey(state_now, w)
+                    for v in extra_vars
+                        push!(headers, string(w, "_", v))
+                        push!(col_order, (w, v))
+                    end
+                end
+            end
+            println(io, join(headers, ","))
+            flush(io)
+            header_written = true
+        end
+
+        # 写一行
+        row = String[string(t_global + t_offset)]
+        for (w, k) in col_order
+            val = ""
+            if haskey(wm, w) && haskey(wm[w], k)
+                v = wm[w][k]
+                v = (v isa AbstractVector) ? only(v) : v
+                val = string(v)
+            elseif haskey(state_now, w) && haskey(state_now[w], k)
+                v = state_now[w][k]
+                v = (v isa AbstractVector && length(v) == 1) ? only(v) : v
+                val = string(v)
+            end
+            push!(row, val)
+        end
+        println(io, join(row, ","))
+        flush(io)
+    end
+
+    return logger, io
+end
+
+
+
+
+function make_well_log_hook(logger)
+    return function (done, report, sim, dt, forces_step, max_iter, cfg)
+        if done
+            try
+                state_now = get_output_state(sim.storage, sim.model)
+                rec = progress_recorder(sim)
+                t_global = recorder_current_time(rec, :global)
+                logger(t_global, state_now, forces_step)
+            catch err
+                @warn "well_logger hook failed: $err"
+            end
+        end
+        return done, report
+    end
+end
+
+
+
+
+
 
 function set_default_cnv_mb!(cfg::JutulConfig, sim::JutulSimulator; kwarg...)
     set_default_cnv_mb!(cfg, sim.model; kwarg...)
