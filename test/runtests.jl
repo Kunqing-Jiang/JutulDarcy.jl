@@ -144,5 +144,27 @@ end
     include("dfm.jl")
 end
 
-@run_package_tests
+@testitem "Surfactant foam" begin
+    include("surfactant_foam.jl")
+end
+
+@testitem "Surfactant diffusion" begin
+    include("surfactant_diffusion.jl")
+end
+
+@testitem "Surfactant deposit" begin
+    include("surfactant_deposit.jl")
+end
+
+@testitem "Surfactant adsorption" begin
+    include("surfactant_adsorption.jl")
+end
+
+@testitem "Surfactant validation (slow)" tags=[:slow] begin
+    include("surfactant_slow.jl")
+end
+
+# Items tagged :slow are skipped by the default test run. Run them with
+#   TestItemRunner.run_tests(pkgdir(JutulDarcy); filter = ti -> :slow in ti.tags)
+@run_package_tests filter = ti -> !(:slow in ti.tags)
 nothing
