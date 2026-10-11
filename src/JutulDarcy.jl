@@ -234,8 +234,10 @@ module JutulDarcy
 
     # Tracers
     include("Tracers/Tracers.jl")
-    import JutulDarcy.Tracers: SinglePhaseTracer, MultiPhaseTracer, add_tracers_to_model!, number_of_tracers
-    export SinglePhaseTracer, MultiPhaseTracer, add_tracers_to_model!, number_of_tracers
+    import JutulDarcy.Tracers: SinglePhaseTracer, MultiPhaseTracer, add_tracers_to_model!, number_of_tracers, SurfactantTracer, FmFactor, set_surfactant_model!, check_surfactant_injection
+    export SinglePhaseTracer, MultiPhaseTracer, add_tracers_to_model!, number_of_tracers, SurfactantTracer, FmFactor, set_surfactant_model!, check_surfactant_injection
+    import JutulDarcy.Tracers: LinearSurfactantAdsorption, LangmuirSurfactantAdsorption, TabulatedSurfactantAdsorption, SurfactantRockMass
+    export LinearSurfactantAdsorption, LangmuirSurfactantAdsorption, TabulatedSurfactantAdsorption, SurfactantRockMass
 
     # AFI input support
     include("AFISetup/AFISetup.jl")
