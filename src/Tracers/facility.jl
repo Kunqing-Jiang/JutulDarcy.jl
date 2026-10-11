@@ -70,6 +70,19 @@ function Jutul.update_cross_term_in_entity!(out, i,
     end
     return out
 end
+
+"""
+    perforation_production_concentration(tracer, model, state, i, cell, phase)
+
+Tracer mass fraction carried by `phase` when a perforation produces from
+reservoir `cell`, where `i` is the tracer index. Defaults to the cell's
+`TracerConcentrations`; tracers whose phases carry different concentrations
+specialise it.
+"""
+function perforation_production_concentration(tracer, model, state, i, cell, phase)
+    return state.TracerConcentrations[i, cell]
+end
+
 struct ReservoirFromWellTracerCT{I<:AbstractVector} <: JutulDarcy.AbstractReservoirFromWellCT
     reservoir_cells::I
     well_cells::I
@@ -124,8 +137,9 @@ function Jutul.update_cross_term_in_entity!(out, i,
                 C_perf = state_well.TracerConcentrations[
                     tracer_index, well_cell]
             else
-                C_perf = state_res.TracerConcentrations[
-                    tracer_index, reservoir_cell]
+                C_perf = perforation_production_concentration(
+                    tracer, model_res, state_res, tracer_index,
+                    reservoir_cell, phase)
             end
             v += C_perf*q_ph
         end
