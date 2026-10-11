@@ -63,6 +63,18 @@ function tracer_total_mass_flux(tracer, model, state, phase_mass_fluxes, index, 
     return v
 end
 
+"""
+    tracer_face_flux(tracer, model, state, phase_mass_fluxes, index, upw, kgrad, face)
+
+Mass flux of tracer `index` through a face, for tracers whose flux needs the
+face geometry: `kgrad` holds the cell pair and `face` is the face index. The
+default forwards to [`tracer_total_mass_flux`](@ref), which only upwinds the
+cell concentrations.
+"""
+function tracer_face_flux(tracer, model, state, phase_mass_fluxes, index, upw, kgrad, face)
+    return tracer_total_mass_flux(tracer, model, state, phase_mass_fluxes, index, upw)
+end
+
 function add_tracers_to_model!(model::MultiModel, tracers; names = missing, kwarg...)
     if !isnothing(tracers)
         tracers = TracerFluxType(tracers, names = names)

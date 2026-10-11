@@ -19,7 +19,7 @@ function tracer_flux(Q, face, state, model, kgrad, upw, ft::TracerFluxType)
     T = eltype(Q)
     for i in 1:N
         tracer = tracers[i]
-        v = tracer_total_mass_flux(tracer, model, state, phase_mass_fluxes, i, upw)
+        v = tracer_face_flux(tracer, model, state, phase_mass_fluxes, i, upw, kgrad, face)
         Q = setindex(Q, v, i)
     end
     return Q
