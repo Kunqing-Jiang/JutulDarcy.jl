@@ -1,0 +1,39 @@
+{
+  "doi": "10.1007/s11242-016-0743-6",
+  "figure": 5,
+  "pdf_page": 11,
+  "printed_page": 787,
+  "injected_pv": 0.5,
+  "pdf_sha256": "860246e10473a57d6d52ffa124f6a6935dfa3d7474b59fc41768d020ce5cc39a",
+  "image_sha256": "cebdac199f2674da635d4b4823ff66cc86b018e176b62ad81f5dda443250d360",
+  "raster_size": [
+    1181,
+    912
+  ],
+  "x_pixels": [
+    78,
+    1176
+  ],
+  "panels": [
+    [
+      "gas_saturation",
+      42,
+      232,
+      1.0
+    ],
+    [
+      "csw_g_L",
+      350,
+      540,
+      6.0
+    ],
+    [
+      "mu_app_cP",
+      658,
+      848,
+      30.0
+    ]
+  ],
+  "sample_stride_pixels": 8,
+  "note": "Approximate raster digitization; overlaps, legend and clipped Csw omitted. One pixel corresponds to dx=0.000911, dSg=0.00526, dCsw=0.0316 g/L, dmu=0.158 cP; practical error is several pixels."
+}
