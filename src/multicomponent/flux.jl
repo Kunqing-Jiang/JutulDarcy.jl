@@ -7,32 +7,43 @@
     X = state.LiquidMassFractions
     Y = state.VaporMassFractions
     mass_fluxes = darcy_phase_mass_fluxes(face, state, model, flux_type, kgrad, upw)
-    q = compositional_fluxes!(q, X, Y, mass_fluxes, upw, aqua, ph_ix, component_count)
+    q = compositional_fluxes!(q, face, state, model, flux_type, kgrad, X, Y,
+        mass_fluxes, upw, aqua, ph_ix, component_count)
 
     Dl = phase_diffusivities(state, LiquidPhase())
     Dv = phase_diffusivities(state, VaporPhase())
     return add_diffusive_component_flux(q, Dl, Dv, face, state, model, kgrad, component_count)
 end
 
-@inline function compositional_fluxes!(q, X, Y, mass_fluxes, upw, ::Val{false},
-        phase_ix, component_count)
+@inline function compositional_fluxes!(q, face, state, model, flux_type, kgrad,
+        X, Y, mass_fluxes, upw, ::Val{false}, phase_ix, component_count)
     l, v = phase_ix
-    return inner_compositional!(q, X, Y, mass_fluxes[l], mass_fluxes[v], upw, component_count)
+    # Shear-thinning foam reads the vapor fractions from the cell the foam model
+    # selects, rather than from the phase-flux upwind cell.
+    gas_upstream = foam_shear_upstream(foam_shear_definition(model), face, v,
+        state, model, flux_type, kgrad, upw)
+    return inner_compositional!(q, X, Y, mass_fluxes[l], mass_fluxes[v], upw,
+        component_count, gas_upstream)
 end
 
-@inline function compositional_fluxes!(q, X, Y, mass_fluxes, upw, ::Val{true},
-        phase_ix, component_count::Val{N}) where N
+@inline function compositional_fluxes!(q, face, state, model, flux_type, kgrad,
+        X, Y, mass_fluxes, upw, ::Val{true}, phase_ix, component_count::Val{N}) where N
     a, l, v = phase_ix
     q = inner_compositional!(q, X, Y, mass_fluxes[l], mass_fluxes[v], upw, component_count)
     return setindex(q, mass_fluxes[a], N + 1)
 end
 
-@inline function inner_compositional!(q::StaticVector, X, Y, q_l, q_v, upw, ::Val{N}) where N
+@inline function inner_compositional!(q::StaticVector, X, Y, q_l, q_v, upw,
+        ::Val{N}, gas_upstream = nothing) where N
     # Static component indices avoid SVector copies and large GPU local-memory buffers.
     return map(q, eachindex(q)) do q_i, i
         if i <= N
             X_f = upwind(upw, cell -> @inbounds(X[i, cell]), q_l)
-            Y_f = upwind(upw, cell -> @inbounds(Y[i, cell]), q_v)
+            if isnothing(gas_upstream)
+                Y_f = upwind(upw, cell -> @inbounds(Y[i, cell]), q_v)
+            else
+                Y_f = @inbounds(Y[i, gas_upstream])
+            end
             oftype(q_i, q_l*X_f + q_v*Y_f)
         else
             q_i

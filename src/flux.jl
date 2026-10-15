@@ -1,3 +1,10 @@
+# Tracers supplies the concrete shear definition after the core flux methods.
+function foam_shear_flux end
+function foam_shear_upstream end
+foam_shear_flux(::Nothing, args...) = nothing
+foam_shear_upstream(::Nothing, args...) = nothing
+@inline foam_shear_definition(model) = get(model.secondary_variables, :FoamShearGradient, nothing)
+
 @inline function Jutul.face_flux!(q_i, left, right, face, face_sign, eq::ConservationLaw{:TotalMasses, <:Any}, state, model::DarcyFlowModel, dt, flow_disc::TwoPointPotentialFlowHardCoded)
     # Specific version for tpfa flux
     kgrad = TPFA(left, right, face_sign)
@@ -36,6 +43,13 @@ end
     if ismissing(Q)
         Q = darcy_permeability_potential_differences(face, state, model, flux_type, kgrad, upw, phase)[1]
     end
+    shear_flux = foam_shear_flux(foam_shear_definition(model), face, phase, state, model, kgrad, upw, Q)
+    if shear_flux !== nothing
+        u, qs = shear_flux
+        ρλ_f = haskey(state, :PhaseMassMobilities) ? state.PhaseMassMobilities[phase, u] :
+            state.PhaseMobilities[phase, u]*state.PhaseMassDensities[phase, u]
+        return ρλ_f*qs
+    end
     if haskey(state, :PhaseMassMobilities)
         ρλ = state.PhaseMassMobilities
         ρλ_f = phase_upwind(upw, ρλ, phase, Q)
@@ -60,6 +74,11 @@ end
 @inline function darcy_phase_volume_flux(face, phase, state, model, flux_type, kgrad, upw, Q = missing)
     if ismissing(Q)
         Q = darcy_phase_kgrad_potential(face, phase, state, model, flux_type, kgrad, upw, phase)
+    end
+    shear_flux = foam_shear_flux(foam_shear_definition(model), face, phase, state, model, kgrad, upw, Q)
+    if shear_flux !== nothing
+        u, qs = shear_flux
+        return state.PhaseMobilities[phase, u]*qs
     end
     λ = state.PhaseMobilities
     F = cell -> @inbounds λ[phase, cell]

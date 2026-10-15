@@ -1,5 +1,5 @@
 """
-    set_surfactant_model!(model; foam=FmFactor())
+    set_surfactant_model!(model; foam=FmFactor(), shear=nothing)
 
 Install the surfactant diffusion face parameter when `D !== nothing`, the
 surfactant partition, the volumetric liquid concentration, the
@@ -12,6 +12,9 @@ changing the model. Call the installer once. To replace an installed foam
 configuration, use `replace_variables!(reservoir_model(model), FmFactor=foam)`.
 The low-level replacement checks vector length during default initialization;
 explicit `FmFactor` state values bypass that initialization check.
+`shear` optionally installs [`FoamShearThinning`](@ref); an exponent of zero
+keeps the original flux and Jacobian paths. Install before creating states or
+simulators, and rebuild them to change the shear configuration.
 When adsorption is enabled, it also installs the static `SurfactantRockMass`
 parameter on the reservoir.
 
@@ -22,12 +25,12 @@ injecting perforation and the well-facility coupling use the well-node
 concentration. The simple wells that `add_tracers_to_model!` accepts have
 no internal faces that would need the phase partition.
 """
-function set_surfactant_model!(outer_model::MultiModel; foam=FmFactor())
-    set_surfactant_model!(reservoir_model(outer_model); foam)
+function set_surfactant_model!(outer_model::MultiModel; foam=FmFactor(), shear=nothing)
+    set_surfactant_model!(reservoir_model(outer_model); foam, shear)
     return outer_model
 end
 
-function set_surfactant_model!(model::SimulationModel; foam=FmFactor())
+function set_surfactant_model!(model::SimulationModel; foam=FmFactor(), shear=nothing)
     tracers = model.equations[:tracers].flux_type.tracers
     n_surf = count(x -> isa(x, SurfactantTracer), tracers)
     if n_surf != 1
@@ -54,11 +57,16 @@ function set_surfactant_model!(model::SimulationModel; foam=FmFactor())
     gas_index = findfirst(==(VaporPhase()), phases)
     tracer.gas_index == gas_index ||
         throw(ArgumentError("SurfactantTracer was built for a system with the gas phase at position $(tracer.gas_index), but this model has it at position $gas_index"))
+    shear === nothing || shear isa FoamShearThinning || throw(ArgumentError("shear must be nothing or FoamShearThinning"))
+    shear_gradient = foam_shear_enabled(shear) ? FoamShearGradient(model, shear) : nothing
     set_secondary_variables!(model,
         SurfactantPartition = SurfactantPartition(tracer_ix, tracer),
         ClVolumetricConcentration = ClVolumetricConcentration(tracer.liquid_index),
         FmFactor = foam
     )
+    if shear_gradient !== nothing
+        svars[:FoamShearGradient] = shear_gradient
+    end
     mu = viscosities_in[:PhaseViscosities]
     viscosities_in[:BasePhaseViscosities] = mu
     delete!(viscosities_in, :PhaseViscosities)

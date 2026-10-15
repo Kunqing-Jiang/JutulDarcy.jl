@@ -236,6 +236,8 @@ module JutulDarcy
     include("Tracers/Tracers.jl")
     import JutulDarcy.Tracers: SinglePhaseTracer, MultiPhaseTracer, add_tracers_to_model!, number_of_tracers, SurfactantTracer, FmFactor, set_surfactant_model!, check_surfactant_injection
     export SinglePhaseTracer, MultiPhaseTracer, add_tracers_to_model!, number_of_tracers, SurfactantTracer, FmFactor, set_surfactant_model!, check_surfactant_injection
+    import JutulDarcy.Tracers: FoamShearThinning, foam_shear_diagnostics
+    export FoamShearThinning, foam_shear_diagnostics
     import JutulDarcy.Tracers: LinearSurfactantAdsorption, LangmuirSurfactantAdsorption, TabulatedSurfactantAdsorption, SurfactantRockMass
     export LinearSurfactantAdsorption, LangmuirSurfactantAdsorption, TabulatedSurfactantAdsorption, SurfactantRockMass
 

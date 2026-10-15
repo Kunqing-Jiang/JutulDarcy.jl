@@ -148,6 +148,10 @@ end
     include("surfactant_foam.jl")
 end
 
+@testitem "Surfactant shear thinning" begin
+    include("surfactant_shear.jl")
+end
+
 @testitem "Surfactant diffusion" begin
     include("surfactant_diffusion.jl")
 end

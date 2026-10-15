@@ -59,12 +59,14 @@ function tracer_face_flux(tracer::SurfactantTracer, model, state, phase_mass_flu
     D = tracer.D
     P = state.SurfactantPartition
     gas_index = tracer.gas_index
+    gas_upstream = JutulDarcy.foam_shear_upstream(JutulDarcy.foam_shear_definition(model),
+        face, gas_index, state, model, model.equations[:tracers].flux_type, kgrad, upw)
     v = zero(eltype(P))
     for phase in tracer_phase_indices(tracer)
         q_ph = phase_mass_fluxes[phase]
         row = phase == gas_index ? 2 : 1
         F = cell -> P[row, cell]
-        C_iface = upwind(upw, F, q_ph)
+        C_iface = phase == gas_index && gas_upstream !== nothing ? F(gas_upstream) : upwind(upw, F, q_ph)
         v += C_iface * q_ph
         v = add_diffusive_tracer_flux(v, state, D, face, kgrad, phase, view(P, row, :), gas_index)
     end
