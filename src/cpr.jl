@@ -594,7 +594,55 @@ function update_weights!(cpr, cpr_storage::CPRStorage, model, storage, J, ps)
             end
         end
     end
+    warn_nonfinite_cpr_weights(w, rmodel, rstorage, nc, cpr.strategy)
     return w
+end
+
+"""
+    warn_nonfinite_cpr_weights(w, rmodel, rstorage, nc, strategy)
+
+Warn when CPR pressure weights are not finite. Such weights put non-finite
+entries into the pressure system, and the linear solve then typically returns
+a non-finite update that Jutul only reports as invalid primary variable
+updates.
+
+The weight columns follow the active cells of the reservoir model, which on a
+subdomain differ from the local cell numbering. The warning reads pressures
+through the same active view and reports global cell indices.
+
+True-IMPES weights solve a system with the accumulation block of each cell. One
+possible cause of a singular block is an accumulation that does not depend on
+pressure in any component. This happens, for example, when the pressure leaves
+the range of a property table that is held constant beyond its endpoints; the
+default CO2-brine tables end at 1e8 Pa. Other causes, such as non-finite
+accumulation terms, are not distinguished here.
+"""
+function warn_nonfinite_cpr_weights(w, rmodel, rstorage, nc, strategy)
+    any(!isfinite, w) || return nothing
+    w_host = Array(w)
+    bad = findall(i -> !all(isfinite, view(w_host, :, i)), axes(w_host, 2))
+    bad_cells = filter(<=(nc), bad)
+    n_other = length(bad) - length(bad_cells)
+    M = Jutul.global_map(rmodel.domain)
+    p = Array(value.(Jutul.active_view(rstorage.state.Pressure, M)))
+    full_cells = Jutul.active_entities(rmodel.domain, M, Cells())
+    shown = first(bad_cells, 5)
+    cell_info = join(["cell $(Jutul.global_cell(full_cells[c], M)) at $(round(p[c]/1e5, digits = 1)) bar" for c in shown], ", ")
+    msg = "CPR pressure weights are not finite in $(length(bad_cells)) reservoir cells"
+    if length(bad_cells) > 0
+        msg *= " (" * cell_info * (length(bad_cells) > length(shown) ? ", ..." : "") * ")"
+    end
+    if n_other > 0
+        msg *= " and $n_other fracture or well rows"
+    end
+    msg *= ". The pressure system will contain non-finite entries and the linear solve is likely to fail."
+    if strategy == :true_impes
+        msg *= " A possible cause is an accumulation term that does not depend on" *
+            " pressure, for example pressure outside a property table that is held" *
+            " constant beyond its endpoints (the default CO2-brine tables end at 1e8 Pa)."
+    end
+    @warn msg maxlog = 3
+    return nothing
 end
 
 function cpr_weights_for_reservoir!(model::SimulationModel, J, cpr, cpr_storage, storage, offset)
