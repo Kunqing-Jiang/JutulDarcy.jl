@@ -4,7 +4,7 @@
 Least-squares gas shear thinning with the TPFA normal potential retained.
 `fmcap > 0` and `epcap >= 0` define the capillary-number response; surface
 tension `sigma > 0` is in N/m and must match the calibration of `fmcap`.
-All three values must be finite. An exponent of zero disables shear entirely.
+An exponent of zero disables shear entirely.
 
 For an internal face, let `Q` be the gas permeability-potential difference
 before multiplying by mobility, `A` its area, and `n̂` its unit normal. Bars
@@ -15,15 +15,12 @@ With diagonal permeability `K`,
 \mathbf t=(I-\hat{\mathbf n}\hat{\mathbf n}^{T})
     (K_l\mathbf g_l+K_r\mathbf g_r)/2,\qquad
 N=\frac{\sqrt{(\bar Q/A)^2+|\mathbf t|^2}}{\sigma},\qquad
-\eta=\frac{(\bar Q/A)^2}{(\bar Q/A)^2+|\mathbf t|^2}.
+\eta=\frac{(\bar Q/A)^2}{(\bar Q/A)^2+|\mathbf t|^2},
 ```
-Set `η=0` when both components vanish. This is a dimensionless,
-pressure-gradient capillary number: `darcy_permeability_potential_difference`
-returns `-T*(Δp + Δpc + ρgΔz)`, so both `Q/A` and `K*g` have units Pa m,
-matching `sigma` in N/m. It is not a velocity divided by surface tension;
-`fmcap` must be calibrated for this definition and the supplied `sigma`.
-
-Writing `b=fmcap`, `e=epcap` and `FM` for the upstream zero-shear foam factor,
+with `η=0` when both components vanish. `N` is a dimensionless
+pressure-gradient capillary number (`Q/A` and `K*g` are in Pa m), not a
+velocity divided by surface tension. Writing `b=fmcap`, `e=epcap` and `FM`
+for the zero-shear foam factor of the cell upstream of `Q`,
 ```math
 F_{cap}(N)=\begin{cases}1 & N\le b\\(b/N)^e & N>b,\end{cases}\qquad
 m=\frac{1}{FM+(1-FM)F_{cap}},
@@ -34,22 +31,22 @@ e(1-\overline{FM})F_{cap}/[\overline{FM}+(1-\overline{FM})F_{cap}] & N>b,
 \end{cases}\qquad
 \widehat Q=m(FM^{AD},\bar N)Q+\bar m\,s\,\frac{1+\eta}{2}(Q-\bar Q).
 ```
-The zero-valued compensation changes only the local approximate Jacobian;
-the AD dependence of `FM` is retained. If either cell stencil is rank deficient
-(`rtol=1e-12`), use `N=abs(Q)/(A*sigma)` with its AD dependence and `Q̂=m*Q`
-without compensation. Coordinate spans at most `1e-8` times the largest span
-are treated as inactive unless they dominate an internal neighbor displacement.
-This retains real thin-layer connections while ignoring constant-coordinate
-roundoff. Installation warns when more than 10% of cells are rank deficient.
-Fallback diagnostics report `η=1` for nonzero `Q` and `η=0` for zero `Q`.
+The gas flux is the upstream mobility times `Q̂`. The second term is zero in
+value. It approximates the Jacobian contribution of the frozen tangential
+gradient: the log-sensitivity of `N` to `Q` lies in `[η, 1]`, and the
+midpoint minimizes the worst-case error. If either cell stencil is rank
+deficient (`rtol=1e-12`), `N=abs(Q)/(A*sigma)` keeps its AD dependence and
+`Q̂=m*Q`. Coordinate spans at most `1e-8` times the largest span are inactive
+unless they dominate an internal neighbor displacement.
 
-Install through `set_surfactant_model!` before constructing parameters, states
-or simulators. Supports fixed scalar/diagonal permeability, Float64 CPU fully
-implicit two-phase immiscible or isothermal CO2-brine models with TPFA/SPU.
-The gradient is frozen in the local approximate Jacobian. Boundary sources
-and perforations retain their cell foam factors. Rebuild the model and
-simulator to change the configuration or geometry. Adjoint sensitivities are
-rejected because this Jacobian is only a local approximation.
+Install through `set_surfactant_model!` before creating states or simulators,
+and rebuild the model and simulator to change the configuration. Requires a
+two-phase immiscible or CO2-brine system, fully implicit and unpartitioned
+forward simulation with `TwoPointPotentialFlowHardCoded`, and no
+`PermeabilityMultiplier`; other configurations are rejected. Tested for scalar
+or diagonal permeability. Thermal models, NNCs, other gas-phase tracers and
+number types other than Float64 and ForwardDiff are not supported and not
+checked. Boundary sources and perforations keep their cell foam factors.
 """
 struct FoamShearThinning
     fmcap::Float64
@@ -66,181 +63,131 @@ end
 foam_shear_enabled(::Nothing) = false
 foam_shear_enabled(c::FoamShearThinning) = c.epcap > 0
 
+# Installed shear thinning: configuration, gas phase and the geometry computed
+# once at installation. As a secondary variable it holds the cell gradients
+# `g` (dim × cells, Float64) in the state.
 struct FoamShearGradient <: Jutul.VectorVariables
     config::FoamShearThinning
     gas::Int
     neighbors::Matrix{Int}
     areas::Vector{Float64}
-    weights::Vector{Vector{Tuple{Int, Vector{Float64}}}}
-    bad::BitVector
     normals::Matrix{Float64}
     kd::Matrix{Float64}
-    active::Vector{Int}
+    # Per cell: (face, least-squares weight) for each connection.
+    weights::Vector{Vector{Tuple{Int, Vector{Float64}}}}
+    bad::BitVector
 end
 
-function check_foam_shear_forward_model(model)
-    if model.context isa Jutul.CPUJutulContext &&
-            Jutul.represented_as_adjoint(Jutul.matrix_layout(model.context))
-        throw(ArgumentError("Foam shear does not support adjoint or sensitivity models"))
-    end
-    return nothing
-end
-
-function Jutul.values_per_entity(model, v::FoamShearGradient)
-    # Adjoint storage initializes secondary values before any equation assembly.
-    # Check even when the caller supplies a previously allocated gradient cache.
-    check_foam_shear_forward_model(model)
-    return size(v.kd, 1)
-end
-Jutul.degrees_of_freedom_per_entity(model, v::FoamShearGradient) = Jutul.values_per_entity(model, v)
-Jutul.associated_entity(::FoamShearGradient) = Cells()
-function Jutul.get_dependencies(::FoamShearGradient, model)
-    return Tuple(k for k in (:Pressure, :Saturations, :PhaseMassDensities, :CapillaryPressure)
-        if haskey(model.primary_variables, k) || haskey(model.secondary_variables, k))
-end
-# Neighbor properties are not synchronized between secondary-variable batches.
-# Refresh this cache only after all batches finish, at the equation entry point.
-Jutul.update_secondary_variable!(G, ::FoamShearGradient, model, state, ix) = G
-function Jutul.subvariable(::FoamShearGradient, ::Jutul.FiniteVolumeGlobalMap)
-    throw(ArgumentError("Foam shear does not support partitioned models or domain decomposition"))
-end
-
+# Reject configurations that would give wrong results without an error. The
+# check runs at installation, when storage is allocated and before each
+# gradient refresh, which covers sequential, partitioned and adjoint models
+# derived after installation, including ones that reuse existing storage.
 function check_foam_shear_model(model)
-    sys = model.system
-    sys isa Union{ImmiscibleSystem, JutulDarcy.LVCompositional2PhaseSystem} ||
-        throw(ArgumentError("Foam shear does not support system $(typeof(sys))"))
-    phases = get_phases(sys)
-    length(phases) == 2 && count(==(VaporPhase()), phases) == 1 ||
-        throw(ArgumentError("Foam shear requires two phases with one VaporPhase"))
+    # Other systems, such as black oil, assemble component fluxes without
+    # face_potential_difference, so tracer and component fluxes would disagree.
+    model.system isa Union{ImmiscibleSystem, JutulDarcy.LVCompositional2PhaseSystem} ||
+        throw(ArgumentError("Foam shear requires an immiscible or CO2-brine two-phase system, got $(typeof(model.system))"))
     model.formulation isa Jutul.FullyImplicitFormulation ||
         throw(ArgumentError("Foam shear requires FullyImplicitFormulation, got $(typeof(model.formulation))"))
-    model.context isa Jutul.CPUJutulContext ||
-        throw(ArgumentError("Foam shear requires a CPUJutulContext, got $(typeof(model.context))"))
-    check_foam_shear_forward_model(model)
     model.domain.global_map isa Jutul.TrivialGlobalMap ||
         throw(ArgumentError("Foam shear does not support partitioned models"))
-    haskey(model.data_domain, :nnc) && throw(ArgumentError("Foam shear does not support NNCs"))
-    variables = (model.primary_variables, model.secondary_variables, model.parameters)
-    thermal = JutulDarcy.model_is_thermal(model) || any(v -> haskey(v, :FluidEnthalpy), variables) ||
-        any(eq -> eq isa ConservationLaw{:TotalThermalEnergy}, values(model.equations))
-    thermal && throw(ArgumentError("Foam shear requires an isothermal model without FluidEnthalpy or energy equations"))
-    any(v -> haskey(v, :PermeabilityMultiplier), variables) &&
-        throw(ArgumentError("Foam shear does not support PermeabilityMultiplier"))
+    if model.context isa Jutul.CPUJutulContext && Jutul.represented_as_adjoint(Jutul.matrix_layout(model.context))
+        throw(ArgumentError("Foam shear does not support adjoint or sensitivity models"))
+    end
     for key in (:mass_conservation, :tracers)
-        haskey(model.equations, key) || throw(ArgumentError("Foam shear requires equation $key"))
-        eq = model.equations[key]
-        eq.flow_discretization isa TwoPointPotentialFlowHardCoded ||
-            throw(ArgumentError("Foam shear requires TwoPointPotentialFlowHardCoded for $key, got $(typeof(eq.flow_discretization))"))
+        eq = get(model.equations, key, nothing)
+        eq isa ConservationLaw && eq.flow_discretization isa TwoPointPotentialFlowHardCoded ||
+            throw(ArgumentError("Foam shear requires TwoPointPotentialFlowHardCoded for equation $key"))
     end
-    gas = findfirst(==(VaporPhase()), phases)
-    tracers = model.equations[:tracers].flux_type.tracers
-    count(t -> t isa SurfactantTracer, tracers) == 1 ||
-        throw(ArgumentError("Foam shear requires exactly one SurfactantTracer"))
-    for t in tracers
-        if !(t isa SurfactantTracer) && gas in tracer_phase_indices(t)
-            throw(ArgumentError("Foam shear supports gas tracer loads only for SurfactantTracer, got $(typeof(t))"))
-        end
-    end
-    for (key, v) in pairs(model.secondary_variables)
-        v isa FoamShearGradient && continue
-        :FoamShearGradient in Jutul.get_dependencies(v, model) &&
-            throw(ArgumentError("Secondary variable $key cannot depend on the late FoamShearGradient cache"))
-    end
+    # The multiplier scales the normal transmissibility, but the tangential
+    # part uses the permeability fixed at installation.
+    any(v -> haskey(v, :PermeabilityMultiplier), (model.parameters, model.secondary_variables)) &&
+        throw(ArgumentError("Foam shear does not support PermeabilityMultiplier"))
     return nothing
 end
 
-shear_number_supported(::Type) = false
-shear_number_supported(::Type{Float64}) = true
-shear_number_supported(::Type{<:Jutul.ForwardDiff.Dual{T, Float64, N}}) where {T, N} = true
-function check_shear_number(::Type{T}) where T
-    shear_number_supported(T) || throw(ArgumentError("Foam shear requires Float64 or local Float64 ForwardDiff Dual, got $T"))
-    return nothing
-end
-@inline function check_shear_state(state)
-    for k in (:PermeabilityMultiplier, :FluidEnthalpy)
-        haskey(state, k) && throw(ArgumentError("Foam shear does not support state field $k"))
-    end
-    # Literal keys let local AD views resolve field types without allocating
-    # a dynamically selected view for every field on every face.
-    haskey(state, :Pressure) && check_shear_number(eltype(state[:Pressure]))
-    haskey(state, :PhaseMassDensities) && check_shear_number(eltype(state[:PhaseMassDensities]))
-    haskey(state, :Saturations) && check_shear_number(eltype(state[:Saturations]))
-    haskey(state, :CapillaryPressure) && check_shear_number(eltype(state[:CapillaryPressure]))
-    haskey(state, :Transmissibilities) && check_shear_number(eltype(state[:Transmissibilities]))
-    haskey(state, :TwoPointGravityDifference) && check_shear_number(eltype(state[:TwoPointGravityDifference]))
-    haskey(state, :FmFactor) && check_shear_number(eltype(state[:FmFactor]))
-    haskey(state, :PhaseMobilities) && check_shear_number(eltype(state[:PhaseMobilities]))
-    haskey(state, :PhaseMassMobilities) && check_shear_number(eltype(state[:PhaseMassMobilities]))
-    haskey(state, :SurfactantPartition) && check_shear_number(eltype(state[:SurfactantPartition]))
-    haskey(state, :LiquidMassFractions) && check_shear_number(eltype(state[:LiquidMassFractions]))
-    haskey(state, :VaporMassFractions) && check_shear_number(eltype(state[:VaporMassFractions]))
-    haskey(state, :TracerConcentrations) && check_shear_number(eltype(state[:TracerConcentrations]))
-    haskey(state, :OverallMoleFractions) && check_shear_number(eltype(state[:OverallMoleFractions]))
-    haskey(state, :FoamShearGradient) && check_shear_number(eltype(state[:FoamShearGradient]))
-    return nothing
-end
-
-# Fit the oriented potential drops on all internal neighbor connections.
 function foam_shear_geometry(d)
-    cc=d[:cell_centroids]; N=d[:neighbors]; dim,nc=size(cc); nf=size(N,2)
-    normals=copy(d[:normals]); A=d[:areas]; k=d[:permeability]
-    ndims(k)==1 || size(k,1) in (1,dim) || throw(ArgumentError("Only diagonal permeability is supported"))
-    all(isfinite,k) && minimum(k)>0 || throw(ArgumentError("Positive finite diagonal permeability is required"))
-    kd=ndims(k)==1 ? repeat(reshape(k,1,:),dim,1) : size(k,1)==1 ? repeat(k,dim,1) : Matrix(k)
-    size(kd)==(dim,nc) || throw(ArgumentError("Permeability shape mismatch"))
-    all(isfinite,cc) && all(isfinite,normals) || throw(ArgumentError("Finite geometry required"))
-    actual=JutulDarcy.reservoir_transmissibility(d)
-    length(actual)==nf && all(x->isfinite(x)&&x>0,actual) || throw(ArgumentError("Positive finite TPFA transmissibilities without NNC required"))
-    spans = vec(maximum(cc; dims=2) - minimum(cc; dims=2))
-    # Ignore roundoff in nominally constant coordinates on single-layer grids.
+    cc = d[:cell_centroids]
+    N = d[:neighbors]
+    dim, nc = size(cc)
+    normals = copy(d[:normals])
+    for f in axes(normals, 2)
+        normals[:, f] ./= norm(normals[:, f])
+    end
+    k = d[:permeability]
+    kd = if ndims(k) == 1
+        repeat(reshape(k, 1, :), dim, 1)
+    elseif size(k, 1) == 1
+        repeat(k, dim, 1)
+    elseif size(k, 1) == dim
+        Matrix{Float64}(k)
+    else
+        throw(ArgumentError("Foam shear requires scalar or diagonal permeability"))
+    end
+    spans = vec(maximum(cc; dims = 2) - minimum(cc; dims = 2))
+    # Ignore roundoff in nominally constant coordinates on single-layer grids,
+    # but keep a direction that dominates a connection: it is a thin layer.
     active = findall(>(1e-8*maximum(spans)), spans)
-    isempty(active) && throw(ArgumentError("No active coordinate direction"))
-    connections=[Tuple{Int,Int}[] for _ in 1:nc]; seen=Set{Tuple{Int,Int}}()
-    for f in 1:nf
-        l,r=N[:,f]; pair=minmax(l,r)
-        1<=l<=nc && 1<=r<=nc && l!=r && !(pair in seen) || throw(ArgumentError("Invalid or duplicate connection"))
-        push!(seen,pair);push!(connections[l],(f,r));push!(connections[r],(f,l))
-        nn=norm(normals[:,f]);nn>0 && isfinite(nn) && isfinite(A[f]) && A[f]>0 || throw(ArgumentError("Invalid face geometry"))
-        normals[:,f]./=nn
-        # A small domain span can be a real thin layer. Retain any direction
-        # that dominates an internal connection so its projected distance
-        # cannot collapse solely because of the global span cutoff.
-        j = argmax(abs.(cc[:,r] - cc[:,l]))
+    connections = [Tuple{Int, Int}[] for _ in 1:nc]
+    for f in axes(N, 2)
+        l, r = N[1, f], N[2, f]
+        push!(connections[l], (f, r))
+        push!(connections[r], (f, l))
+        j = argmax(abs.(cc[:, r] - cc[:, l]))
         spans[j] > 0 && !(j in active) && push!(active, j)
     end
     sort!(active)
-    weights=[Tuple{Int,Vector{Float64}}[] for _ in 1:nc];bad=falses(nc)
+    weights = [Tuple{Int, Vector{Float64}}[] for _ in 1:nc]
+    bad = falses(nc)
     for c in 1:nc
-        cs=connections[c]
-        D=hcat([cc[active,j]-cc[active,c] for (_,j) in cs]...)
-        if isempty(cs) || rank(D;rtol=1e-12)<length(active)
-            bad[c]=true;continue
+        cs = connections[c]
+        D = hcat([cc[active, j] - cc[active, c] for (_, j) in cs]...)
+        if isempty(cs) || rank(D; rtol = 1e-12) < length(active)
+            bad[c] = true
+            continue
         end
-        w=1.0./vec(sum(abs2,D;dims=1)); M=(D.*reshape(w,1,:))*D'
-        B=M\(D.*reshape(w,1,:))
-        for (i,(f,j)) in enumerate(cs)
-            v=zeros(dim);v[active].=B[:,i].*(N[1,f]==c ? 1 : -1)
-            push!(weights[c],(f,v))
+        w = 1.0 ./ vec(sum(abs2, D; dims = 1))
+        M = (D .* reshape(w, 1, :))*D'
+        B = M \ (D .* reshape(w, 1, :))
+        for (i, (f, j)) in enumerate(cs)
+            v = zeros(dim)
+            v[active] .= B[:, i] .* (N[1, f] == c ? 1 : -1)
+            push!(weights[c], (f, v))
         end
     end
-    return (;weights,bad,normals,kd,active,actual)
+    return (; weights, bad, normals, kd, active)
 end
 
 function FoamShearGradient(model, config::FoamShearThinning)
     check_foam_shear_model(model)
     d = model.data_domain
     g = foam_shear_geometry(d)
-    areas = Vector{Float64}(d[:areas])
     nbad = count(g.bad)
     if nbad > 0.1*length(g.bad)
         @warn "Foam shear uses the face-normal fallback next to rank-deficient cells" fallback_cells=nbad total_cells=length(g.bad)
     end
     gas = findfirst(==(VaporPhase()), get_phases(model.system))
-    return FoamShearGradient(config, gas, Matrix{Int}(d[:neighbors]), areas,
-        g.weights, g.bad, g.normals, g.kd, g.active)
+    return FoamShearGradient(config, gas, Matrix{Int}(d[:neighbors]),
+        Vector{Float64}(d[:areas]), g.normals, g.kd, g.weights, g.bad)
 end
 
-# Strip all supported Dual tags without copying the underlying arrays.
+function Jutul.values_per_entity(model, v::FoamShearGradient)
+    check_foam_shear_model(model)
+    return size(v.kd, 1)
+end
+# The gradient is refreshed at the equation entry point (update_equations! below).
+Jutul.update_secondary_variable!(G, ::FoamShearGradient, model, state, ix) = G
+function Jutul.initialize_secondary_variable_ad!(state, model, v::FoamShearGradient, symb, npartials; kwarg...)
+    # The gradient is frozen in the local Jacobian, so Float64 storage needs no
+    # AD partials. Preserve Jutul's conversion behavior for other input types.
+    if eltype(state[symb]) === Float64
+        return state
+    end
+    return invoke(Jutul.initialize_secondary_variable_ad!, Tuple{Any, Any, Any, Any, Any},
+        state, model, v, symb, npartials; kwarg...)
+end
+
+# Strip all Dual tags without copying the underlying arrays.
 foam_primal_view(A::AbstractArray{Float64}) = A
 foam_primal_view(A::AbstractArray) = Jutul.mappedarray(primal_value, A)
 function foam_potential_values(state)
@@ -249,30 +196,24 @@ function foam_potential_values(state)
     return (; (k => foam_primal_view(state[k]) for k in fields if haskey(state, k))...)
 end
 
-function fill_foam_shear_gradients!(G, v::FoamShearGradient, pv, model, ix)
-    dim = size(v.kd, 1)
-    g = zeros(dim)
-    for c in ix
+function fill_foam_shear_gradients!(G, v::FoamShearGradient, pv, model, cells)
+    g = zeros(size(G, 1))
+    for c in cells
         fill!(g, 0.0)
         if !v.bad[c]
             for (f, w) in v.weights[c]
-                l = v.neighbors[1, f]; r = v.neighbors[2, f]
+                l, r = v.neighbors[1, f], v.neighbors[2, f]
                 q = JutulDarcy.darcy_permeability_potential_difference(f, pv, model, nothing, TPFA(l, r, 1), SPU(l, r), v.gas)
-                T = pv.Transmissibilities[f]
-                isfinite(T) && T > 0 || throw(ArgumentError("Foam shear requires positive finite runtime transmissibility"))
-                g .+= w .* (q/T)
+                g .+= w .* (q/pv.Transmissibilities[f])
             end
         end
-        for j in 1:dim
-            G[j, c] = g[j]
-        end
+        G[:, c] .= g
     end
     return G
 end
 
-function prepare_foam_shear!(state, model, v::FoamShearGradient)
+function update_foam_shear_gradients!(state, model, v::FoamShearGradient)
     check_foam_shear_model(model)
-    check_shear_state(state)
     pv = foam_potential_values(state)
     G = state.FoamShearGradient
     nb = clamp(size(G, 2) ÷ Jutul.minbatch(model.context), 1, Jutul.nthreads(model.context))
@@ -280,21 +221,19 @@ function prepare_foam_shear!(state, model, v::FoamShearGradient)
         fill_foam_shear_gradients!(G, v, pv, model, axes(G, 2))
     else
         Threads.@threads for batch in 1:nb
-            ix = Jutul.entity_eachindex(G, batch, nb)
-            fill_foam_shear_gradients!(G, v, pv, model, ix)
+            fill_foam_shear_gradients!(G, v, pv, model, Jutul.entity_eachindex(G, batch, nb))
         end
     end
     return G
 end
 
-function prepare_foam_shear!(state, model)
-    v = get(model.secondary_variables, :FoamShearGradient, nothing)
-    v === nothing && return nothing
-    return prepare_foam_shear!(state, model, v)
-end
-
+# Neighbor properties are not synchronized between secondary-variable batches,
+# so the gradients are refreshed once all batches finish, before the equations.
 function Jutul.update_equations!(storage, model::JutulDarcy.DarcyFlowModel, dt)
-    prepare_foam_shear!(Jutul.evaluation_state(storage), model)
+    v = get(model.secondary_variables, :FoamShearGradient, nothing)
+    if v isa FoamShearGradient
+        update_foam_shear_gradients!(Jutul.evaluation_state(storage), model, v)
+    end
     Jutul.update_equations!(storage, storage.equations, model.equations, model, dt)
     return nothing
 end
@@ -302,36 +241,21 @@ end
 foam_fcap(n, b, e) = primal_value(n) <= b ? one(n) : (b/n)^e
 foam_shear_multiplier(fm, n, c) = inv(fm + (1 - fm)*foam_fcap(n, c.fmcap, c.epcap))
 
-function foam_ls_magnitude(f, Q, state, v::FoamShearGradient)
-    G = state.FoamShearGradient
-    l = v.neighbors[1, f]; r = v.neighbors[2, f]
-    dim = size(v.kd, 1)
+# Capillary number N and normal share η from primal Q and the cell gradients.
+function foam_ls_magnitude(f, Q, G, v::FoamShearGradient)
+    l, r = v.neighbors[1, f], v.neighbors[2, f]
+    Kg(j) = (v.kd[j, l]*primal_value(G[j, l]) + v.kd[j, r]*primal_value(G[j, r]))/2
     vn = 0.0
-    @inbounds for j in 1:dim
-        vj = (v.kd[j, l]*primal_value(G[j, l]) + v.kd[j, r]*primal_value(G[j, r]))/2
-        vn += vj*v.normals[j, f]
+    for j in axes(v.kd, 1)
+        vn += Kg(j)*v.normals[j, f]
     end
     t2 = 0.0
-    @inbounds for j in 1:dim
-        vj = (v.kd[j, l]*primal_value(G[j, l]) + v.kd[j, r]*primal_value(G[j, r]))/2
-        t2 += (vj - vn*v.normals[j, f])^2
+    for j in axes(v.kd, 1)
+        t2 += (Kg(j) - vn*v.normals[j, f])^2
     end
     un = primal_value(Q)/v.areas[f]
     mag2 = un^2 + t2
     return sqrt(mag2)/v.config.sigma, mag2 > 0 ? un^2/mag2 : 0.0
-end
-
-function foam_face_magnitude(f, Q, state, v::FoamShearGradient)
-    l = v.neighbors[1, f]; r = v.neighbors[2, f]
-    fallback = v.bad[l] || v.bad[r]
-    if fallback
-        # Keep the potential derivative on a rank-deficient stencil.
-        n = abs(Q)/(v.areas[f]*v.config.sigma)
-        eta = iszero(primal_value(Q)) ? 0.0 : 1.0
-    else
-        n, eta = foam_ls_magnitude(f, Q, state, v)
-    end
-    return n, eta, fallback
 end
 
 function foam_corrected_potential(Q, fm, n, eta, c::FoamShearThinning)
@@ -344,86 +268,14 @@ function foam_corrected_potential(Q, fm, n, eta, c::FoamShearThinning)
     return m*Q + primal_value(m)*s*((1 + eta)/2)*(Q - primal_value(Q))
 end
 
-@inline function check_shear_face_inputs(model, state, kgrad, upw)
-    model.formulation isa Jutul.FullyImplicitFormulation ||
-        throw(ArgumentError("Foam shear requires FullyImplicitFormulation, got $(typeof(model.formulation))"))
-    check_shear_state(state)
-    kgrad isa TPFA && upw isa SPU || throw(ArgumentError("Foam shear requires TPFA and SPU, got $(typeof(kgrad)) and $(typeof(upw))"))
-    return nothing
-end
-
-function foam_canonical_upstream(v::FoamShearGradient, face, Q, model, state, kgrad, upw)
-    check_shear_face_inputs(model, state, kgrad, upw)
-    return foam_canonical_upstream(v, face, Q, kgrad, upw)
-end
-
-function foam_canonical_upstream(v::FoamShearGradient, face, Q, kgrad, upw)
-    check_shear_number(typeof(Q))
-    l = v.neighbors[1, face]; r = v.neighbors[2, face]
-    signhalf = if kgrad.left == l && kgrad.right == r
-        1
-    elseif kgrad.left == r && kgrad.right == l
-        -1
-    else
-        throw(ArgumentError("Foam shear half-face cells do not match the installed geometry"))
+function JutulDarcy.face_potential_difference(v::FoamShearGradient, face, phase, state, model, upw, Q)
+    phase == v.gas || return Q
+    fm = state.FmFactor[upwind(upw, identity, Q)]
+    if v.bad[v.neighbors[1, face]] || v.bad[v.neighbors[2, face]]
+        # Keep the potential derivative on a rank-deficient stencil.
+        n = abs(Q)/(v.areas[face]*v.config.sigma)
+        return foam_shear_multiplier(fm, n, v.config)*Q
     end
-    kgrad.face_sign == signhalf || throw(ArgumentError("Foam shear half-face gravity orientation does not match the installed geometry"))
-    upw.left == kgrad.left && upw.right == kgrad.right || throw(ArgumentError("Foam shear has inconsistent TPFA upwind cells"))
-    q = signhalf*Q
-    u = primal_value(q) < 0 ? r : l
-    return u, q, signhalf
-end
-
-function JutulDarcy.foam_shear_flux(v::FoamShearGradient, face, phase, state, model, kgrad, upw, Q)
-    (foam_shear_enabled(v.config) && phase == v.gas) || return nothing
-    u, q, signhalf = foam_canonical_upstream(v, face, Q, model, state, kgrad, upw)
-    n, eta, fallback = foam_face_magnitude(face, q, state, v)
-    fm = state.FmFactor[u]
-    qs = fallback ? foam_shear_multiplier(fm, n, v.config)*q : foam_corrected_potential(q, fm, n, eta, v.config)
-    return u, signhalf*qs
-end
-
-function JutulDarcy.foam_shear_upstream(v::FoamShearGradient, face, phase, state, model, ft, kgrad, upw)
-    (foam_shear_enabled(v.config) && phase == v.gas) || return nothing
-    # Validate before computing the potential, including generic tracer inputs.
-    check_shear_face_inputs(model, state, kgrad, upw)
-    Q = JutulDarcy.darcy_permeability_potential_difference(face, state, model, ft, kgrad, upw, phase)
-    return first(foam_canonical_upstream(v, face, Q, kgrad, upw))
-end
-
-"""
-    foam_shear_diagnostics(model, parameters, saved_state)
-
-Reconstruct ordinary secondary properties and the shear cache from a saved
-reservoir state, then return internal-face diagnostics. Disabled shear returns
-only `(enabled=false,)`. This does not evaluate boundary or perforation shear.
-"""
-function foam_shear_diagnostics(model::SimulationModel, parameters, saved_state)
-    v = get(model.secondary_variables, :FoamShearGradient, nothing)
-    (v !== nothing && foam_shear_enabled(v.config)) || return (enabled = false,)
-    # Build from primary variables only: saved secondary caches may be stale.
-    initial = Dict(k => deepcopy(saved_state[k]) for k in keys(model.primary_variables))
-    sim = HelperSimulator(model; state0 = initial, parameters)
-    Jutul.update_state_dependents!(sim.storage, model, 1.0, setup_forces(model))
-    state = Jutul.evaluation_state(sim.storage)
-    return foam_shear_diagnostics(state, model, v)
-end
-function foam_shear_diagnostics(state, model, v::FoamShearGradient)
-    rows = map(axes(v.neighbors, 2)) do f
-        l, r = v.neighbors[:, f]
-        kg = TPFA(l, r, 1); up = SPU(l, r)
-        Q = JutulDarcy.darcy_permeability_potential_difference(f, state, model, nothing, kg, up, v.gas)
-        u, _, _ = foam_canonical_upstream(v, f, Q, model, state, kg, up)
-        n, eta, fallback = foam_face_magnitude(f, Q, state, v)
-        fm = state.FmFactor[u]
-        m = foam_shear_multiplier(fm, n, v.config)
-        qm = JutulDarcy.darcy_phase_mass_flux(f, v.gas, state, model, nothing, kg, up, Q)
-        qv = JutulDarcy.darcy_phase_volume_flux(f, v.gas, state, model, nothing, kg, up, Q)
-        return (normal_capillary_number = abs(primal_value(Q))/(v.areas[f]*v.config.sigma),
-            capillary_number = primal_value(n), eta = eta, fallback = fallback,
-            foam_factor = primal_value(fm), multiplier = primal_value(m),
-            effective_foam_factor = primal_value(fm*m),
-            gas_mass_flux = primal_value(qm), gas_volume_flux = primal_value(qv))
-    end
-    return (enabled = true, faces = rows)
+    n, eta = foam_ls_magnitude(face, Q, state.FoamShearGradient, v)
+    return foam_corrected_potential(Q, fm, n, eta, v.config)
 end
