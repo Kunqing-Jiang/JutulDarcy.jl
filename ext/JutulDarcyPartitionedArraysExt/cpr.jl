@@ -25,7 +25,9 @@ function update_pressure_system_hypre_csr!(A_p, A, w_p, helper,
         ::Val{is_adjoint}, ::Val{ncomp}) where {is_adjoint, ncomp}
     csr = helper.csr
     @assert !isnothing(csr)
-    n = size(A, 1)
+    # The local matrix also has rows for ghost cells; only the owned rows
+    # (the first helper.n) belong to this rank's HYPRE row range.
+    n = helper.n
     (; iupper, ilower) = A_p
     @assert n == iupper - ilower + 1
     nzval = SparseArrays.nonzeros(A)
