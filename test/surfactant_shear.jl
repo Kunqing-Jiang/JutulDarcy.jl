@@ -80,11 +80,11 @@ end
     r = model_before_install(lengths=(1.,1.,1.))
     @test_logs min_level=Base.CoreLogging.Warn set_surfactant_model!(r; shear=config())
     v = r.secondary_variables[:FoamShearGradient]
-    @test TR.foam_shear_geometry(r.data_domain).active == [1,2]
+    @test TR.least_squares_gradient_weights(r.data_domain).active == [1,2]
     @test count(v.bad) == 0
     for height in (1e-6, 1e-9, 1e-13)
         r = model_before_install(dims=(3,3,2), lengths=(3.,3.,height))
-        g = try TR.foam_shear_geometry(r.data_domain) catch err; err end
+        g = try TR.least_squares_gradient_weights(r.data_domain) catch err; err end
         @test g isa NamedTuple
         g isa NamedTuple || continue
         @test g.active == [1,2,3]
@@ -98,7 +98,7 @@ end
         cc = r.data_domain[:cell_centroids]
         cc .*= scale
         cc[3,:] .= range(0., 2scale*ratio; length=size(cc,2))
-        g = TR.foam_shear_geometry(r.data_domain)
+        g = TR.least_squares_gradient_weights(r.data_domain)
         @test g.active == (ratio <= 1e-8 ? [1,2] : [1,2,3])
     end
     mesh = extract_submesh(UnstructuredMesh(CartesianMesh((2,2,1))), [1,2,3])
@@ -126,7 +126,7 @@ end
     pressure = [FD.Dual(1.0,2.0),FD.Dual(3.0,4.0)]
     transmissibility = [2.0]
     state = (Pressure=pressure,Transmissibilities=transmissibility)
-    pv = TR.foam_potential_values(state)
+    pv = TR.primal_potential_values(state)
     @test eltype(pv.Pressure) == Float64
     @test pv.Pressure == [1.,3.]
     @test pv.Transmissibilities === transmissibility
@@ -286,7 +286,7 @@ end
     primal = (; (k => Jutul.value.(st[k]) for k in
         (:Pressure, :PhaseMassDensities, :Saturations, :CapillaryPressure,
          :Transmissibilities, :TwoPointGravityDifference) if haskey(st,k))...)
-    TR.fill_foam_shear_gradients!(oracle,v,primal,r,axes(oracle,2))
+    TR.fill_least_squares_gradients!(oracle,v.weights,v.bad,v.neighbors,primal,r,v.gas,axes(oracle,2))
     @test maximum(abs.(Jutul.value.(st.FoamShearGradient)-oracle))<=1e-12
     @test all(x->all(iszero,FD.partials(x)),st.FoamShearGradient)
     for f in axes(v.neighbors,2)

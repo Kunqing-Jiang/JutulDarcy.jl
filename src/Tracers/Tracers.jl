@@ -21,6 +21,8 @@ module Tracers
     include("surfactant/adsorption.jl")
     include("surfactant/diffusion.jl")
     include("surfactant/foam.jl")
+    include("surfactant/cell_gradient.jl")
     include("surfactant/shear.jl")
+    include("surfactant/shear_cache.jl")
     include("surfactant/setup.jl")
 end
