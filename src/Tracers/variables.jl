@@ -15,6 +15,9 @@ Adapt.@adapt_structure TracerMasses
 Jutul.values_per_entity(model, t::TracerMasses) = number_of_tracers(t.flux_type)
 
 function Jutul.update_secondary_variable!(tracer_mass, tm::TracerMasses, model, state, ix)
+    if model_applies_tracer_decay(model, tm.flux_type)
+        check_tracer_decay(model)
+    end
     TracerConcentrations = state.TracerConcentrations
     Saturations = state.Saturations
     PhaseMassDensities = state.PhaseMassDensities

@@ -66,7 +66,8 @@ tracer_phase_indices(t::MultiPhaseTracer) = t.phase_indices
 struct TracerFluxType{T, N, Names} <: Jutul.FluxType
     tracers::T
     names::Names
-    function TracerFluxType(tracers::Tuple; names = missing)
+    decay::NTuple{N, Float64}
+    function TracerFluxType(tracers::Tuple; names = missing, half_life = missing)
         N = length(tracers)
         if ismissing(names)
             names = ["Tracer $i" for i in 1:N]
@@ -75,18 +76,20 @@ struct TracerFluxType{T, N, Names} <: Jutul.FluxType
         end
         T = typeof(tracers)
         names = tuple(names...)
-        return new{T, N, typeof(names)}(tracers, names)
+        return new{T, N, typeof(names)}(tracers, names, tracer_decay_from_half_life(half_life, N))
     end
     function TracerFluxType(tracers::T, names::Names,
-            ::Val{N}) where {T, Names, N}
-        return new{T, N, Names}(tracers, names)
+            ::Val{N}, decay::NTuple{N, Float64} = ntuple(_ -> 0.0, N)) where {T, Names, N}
+        check_tracer_decay_rates(decay)
+        return new{T, N, Names}(tracers, names, decay)
     end
 end
 
 function Adapt.adapt_structure(to, flux::TracerFluxType{T, N}) where {T, N}
+    tracer_has_decay(flux) && throw(ArgumentError("Tracer decay does not support backend adaptation of nonzero rates"))
     # Names are reporting metadata and strings/symbols are not valid kernel
     # arguments. The host model retains the authoritative labels.
-    return TracerFluxType(Adapt.adapt(to, flux.tracers), nothing, Val(N))
+    return TracerFluxType(Adapt.adapt(to, flux.tracers), nothing, Val(N), flux.decay)
 end
 
 function TracerFluxType(tracers::AbstractTracer; kwarg...)
@@ -97,7 +100,10 @@ function TracerFluxType(tracers::AbstractArray; kwarg...)
     return TracerFluxType(tuple(tracers...); kwarg...)
 end
 
-function TracerFluxType(t::TracerFluxType; names = missing)
-    return t
+function TracerFluxType(t::TracerFluxType; names = missing, half_life = missing)
+    ismissing(half_life) && return t
+    tracer_has_decay(t) && throw(ArgumentError("half_life cannot override a TracerFluxType with nonzero decay rates"))
+    return TracerFluxType(t.tracers, t.names, Val(length(t.tracers)),
+        tracer_decay_from_half_life(half_life, length(t.tracers)))
 end
 

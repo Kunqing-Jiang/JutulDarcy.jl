@@ -240,6 +240,8 @@ module JutulDarcy
     export FoamShearThinning
     import JutulDarcy.Tracers: LinearSurfactantAdsorption, LangmuirSurfactantAdsorption, TabulatedSurfactantAdsorption, SurfactantRockMass
     export LinearSurfactantAdsorption, LangmuirSurfactantAdsorption, TabulatedSurfactantAdsorption, SurfactantRockMass
+    import JutulDarcy.Tracers: tracer_decay_rates
+    export tracer_decay_rates
 
     # AFI input support
     include("AFISetup/AFISetup.jl")

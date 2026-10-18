@@ -6,6 +6,7 @@ module Tracers
     import StaticArrays: setindex
 
     export SinglePhaseTracer, MultiPhaseTracer, add_tracers_to_model!, number_of_tracers, SurfactantTracer, FmFactor , set_surfactant_model!, check_surfactant_injection
+    export tracer_decay_rates
     export FoamShearThinning
     export LinearSurfactantAdsorption, LangmuirSurfactantAdsorption, TabulatedSurfactantAdsorption, SurfactantRockMass
 
@@ -14,6 +15,7 @@ module Tracers
     include("equations.jl")
     include("facility.jl")
     include("api.jl")
+    include("decay.jl")
     include("polymer.jl")
     include("surfactant/isotherms.jl")
     include("surfactant/tracer.jl")
