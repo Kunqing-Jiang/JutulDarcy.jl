@@ -215,8 +215,8 @@ end
         @test abs(FD.partials(qv)[1]-expected_dq)<=1e-12*abs(expected_dq)
         qt=TR.tracer_face_flux(tracer,r,st,(zero(qm),qm),1,up,kg,1)
         @test abs(FD.partials(qt)[1]/FD.partials(qm)[1]-expected_c)<=1e-12
-        qc=JD.compositional_fluxes!(SVector(zero(qm),zero(qm)),1,st,st.Saturations,st.PhaseMassDensities,
-            st.LiquidMassFractions,st.VaporMassFractions,nothing,r,nothing,kg,(zero(qm),qm),up,Val(false),(1,2),Val(2))
+        qc=JD.compositional_fluxes!(SVector(zero(qm),zero(qm)),st.LiquidMassFractions,
+            st.VaporMassFractions,(zero(qm),qm),up,Val(false),(1,2),Val(2))
         @test maximum(abs.([FD.partials(x)[1]/FD.partials(qm)[1] for x in qc]-expected_y))<=1e-12
         @test JD.darcy_phase_mass_flux(1,1,st,r,nothing,kg,up,half*Q) == 1000half*Q
         # A zero exponent must preserve the original local-upwind Jacobian.
@@ -242,8 +242,8 @@ end
         qt=TR.tracer_face_flux(tracer,r,st,(zero(qm),qm),1,up,kg,1)
         @test FD.partials(qm)[1]!=0
         @test abs(FD.partials(qt)[1]/FD.partials(qm)[1]-expected_c)<=1e-12
-        qc=JD.compositional_fluxes!(SVector(zero(qm),zero(qm)),1,st,st.Saturations,st.PhaseMassDensities,
-            st.LiquidMassFractions,st.VaporMassFractions,nothing,r,nothing,kg,(zero(qm),qm),up,Val(false),(1,2),Val(2))
+        qc=JD.compositional_fluxes!(SVector(zero(qm),zero(qm)),st.LiquidMassFractions,
+            st.VaporMassFractions,(zero(qm),qm),up,Val(false),(1,2),Val(2))
         @test maximum(abs.([FD.partials(x)[1]/FD.partials(qm)[1] for x in qc]-expected_y))<=1e-12
     end
     st=face_state(r,1.)
