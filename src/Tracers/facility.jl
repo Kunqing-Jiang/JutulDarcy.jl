@@ -132,7 +132,20 @@ function Jutul.update_cross_term_in_entity!(out, i,
         for phase in tracer_phase_indices(tracer)
             q_ph = JutulDarcy.perforation_phase_mass_flux(
                 λ_t, conn, state_res, state_well, phase)
-            if q_ph < 0
+            # Branch on the potential difference, which is what
+            # perforation_phase_mass_flux itself branches on, so that the
+            # concentration always matches the flux formula the mass flux was
+            # computed with. Branching on q_ph instead parts company with it
+            # wherever the flux is zero while the potential difference is not:
+            # an injecting perforation whose well saturation is zero for this
+            # phase gets the injection formula and a production concentration.
+            # Branching on the dual rather than its value parts company with it
+            # at zero potential difference, where ForwardDiff 1 orders
+            # equal-valued duals by their partials and the choice follows the
+            # seeding direction.
+            ψ = JutulDarcy.perforation_phase_potential_difference(
+                conn, state_res, state_well, phase)
+            if Jutul.value(ψ) < 0
                 # Injection
                 C_perf = state_well.TracerConcentrations[
                     tracer_index, well_cell]

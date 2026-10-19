@@ -350,7 +350,8 @@ end
 
     function perforation_tracer_flux(model, state_res, state_well)
         rmodel, wmodel = model[:Reservoir], model[:Producer]
-        out = zeros(promote_type(eltype(state_res.Pressure), eltype(state_well.Pressure)),
+        out = zeros(promote_type(eltype(state_res.Pressure), eltype(state_well.Pressure),
+                eltype(state_well.Saturations)),
             number_of_tracers(rmodel.equations[:tracers].flux_type))
         ct = ReservoirFromWellTracerCT([1], [1])
         Jutul.update_cross_term_in_entity!(out, 1, state_res, state_res, state_well, state_well,
@@ -443,6 +444,111 @@ end
             ad = FD.partials(v)[k]
             @test abs(ad - fd) <= 1e-6*abs(fd)
         end
+    end
+
+    @testset "balanced perforation" begin
+        # Well and reservoir at the same pressure: every phase flux is zero, so
+        # the injection/production branch is a tie. perforation_phase_mass_flux
+        # settles it on the value and returns the production flux, so the cross
+        # term has to carry the reservoir concentrations. Branching on the dual
+        # instead took the well concentration whenever the seeded derivative of
+        # the flux was negative, pairing a production flux with an injection
+        # concentration. Differentiating with respect to the well pressure gives
+        # that negative seed, since dpsi/dp_well = -WI.
+        model = producer_test_model(sys -> SurfactantTracer(sys; k_d = 1.76); n = 3, perforation = 3)
+        prm = setup_parameters(model)
+        forces = setup_reservoir_forces(model;
+            control = Dict(:Producer => ProducerControl(BottomHolePressureTarget(2e7))))
+        s0 = setup_reservoir_state(model; Pressure = 2e7, Saturations = [0.6, 0.4],
+            TracerConcentrations = 1e-3)
+        s0[:Producer][:Pressure] .= 2e7
+        s0[:Producer][:TracerConcentrations] .= 3e-3
+        sim = Simulator(model; state0 = s0, parameters = prm)
+        Jutul.update_state_dependents!(sim.storage, model, 1.0, forces)
+        st_res, st_w = sim.storage[:Reservoir][:state], sim.storage[:Producer][:state]
+        WI = Jutul.value(st_w[:WellIndices])[end]
+        # Only the well pressure keeps its derivatives, so the cross term's
+        # partials are the perforation's dependence on p_well alone.
+        w = (WellIndices = [WI], PerforationGravityDifference = [0.0],
+            Pressure = st_w[:Pressure],
+            TracerConcentrations = Jutul.value(st_w[:TracerConcentrations]),
+            Saturations = Jutul.value(st_w[:Saturations]),
+            PhaseMassDensities = Jutul.value(st_w[:PhaseMassDensities]))
+        r = (Pressure = Jutul.value(st_res[:Pressure])[3:3],
+            PhaseMobilities = Jutul.value(st_res[:PhaseMobilities])[:, 3:3],
+            PhaseMassDensities = Jutul.value(st_res[:PhaseMassDensities])[:, 3:3],
+            SurfactantPartition = Jutul.value(st_res[:SurfactantPartition])[:, 3:3],
+            TracerConcentrations = Jutul.value(st_res[:TracerConcentrations])[:, 3:3])
+        v = only(perforation_tracer_flux(model, r, w))
+        k = findfirst(!iszero, FD.partials(w.Pressure[1]).values)
+        @test count(!iszero, FD.partials(w.Pressure[1]).values) == 1
+        # Jutul scales the pressure seed, so divide it out to get dv/dp_well.
+        seed = FD.partials(w.Pressure[1])[k]
+        @test seed > 0
+        @test FD.value(v) == 0.0
+        rhoL(ph) = r.PhaseMassDensities[ph, 1]*r.PhaseMobilities[ph, 1]
+        d_prod = -WI*sum(r.SurfactantPartition[ph, 1]*rhoL(ph) for ph in 1:2)
+        d_well = -WI*w.TracerConcentrations[1, 1]*sum(rhoL(ph) for ph in 1:2)
+        @test abs(d_prod - d_well) > 0.1*abs(d_prod)
+        @test abs(FD.partials(v, k)/seed - d_prod) <= 1e-12*abs(d_prod)
+    end
+
+    @testset "injecting perforation with an absent phase" begin
+        # An injector carrying only liquid has s_w == 0 for the gas phase, so
+        # that phase's mass flux is zero although the perforation is injecting.
+        # Its derivative with respect to the well saturation is not zero, so the
+        # concentration still matters: both phases have to take the injection
+        # concentration, as perforation_phase_mass_flux took the injection
+        # formula for both. Branching on the flux rather than on the potential
+        # difference gave the absent phase a production concentration.
+        model = producer_test_model(sys -> SurfactantTracer(sys; k_d = 1.76); n = 3, perforation = 3)
+        prm = setup_parameters(model)
+        forces = setup_reservoir_forces(model;
+            control = Dict(:Producer => ProducerControl(BottomHolePressureTarget(2e7))))
+        s0 = setup_reservoir_state(model; Pressure = 2e7, Saturations = [0.6, 0.4],
+            TracerConcentrations = 1e-3)
+        s0[:Producer][:Pressure] .= 2.1e7
+        s0[:Producer][:Saturations][1, 1] = 1.0
+        s0[:Producer][:Saturations][2, 1] = 0.0
+        s0[:Producer][:TracerConcentrations] .= 3e-3
+        sim = Simulator(model; state0 = s0, parameters = prm)
+        Jutul.update_state_dependents!(sim.storage, model, 1.0, forces)
+        st_res, st_w = sim.storage[:Reservoir][:state], sim.storage[:Producer][:state]
+        WI = Jutul.value(st_w[:WellIndices])[end]
+        # Only the well saturation keeps its derivatives this time. The well
+        # node's two phases come out at the same mass density here, which would
+        # make the correct injection derivative vanish identically, so the
+        # densities are set apart to keep both answers away from zero.
+        w = (WellIndices = [WI], PerforationGravityDifference = [0.0],
+            Pressure = Jutul.value(st_w[:Pressure]),
+            TracerConcentrations = Jutul.value(st_w[:TracerConcentrations]),
+            Saturations = st_w[:Saturations],
+            PhaseMassDensities = reshape([1000.0, 500.0], 2, 1))
+        r = (Pressure = Jutul.value(st_res[:Pressure])[3:3],
+            PhaseMobilities = Jutul.value(st_res[:PhaseMobilities])[:, 3:3],
+            PhaseMassDensities = Jutul.value(st_res[:PhaseMassDensities])[:, 3:3],
+            SurfactantPartition = Jutul.value(st_res[:SurfactantPartition])[:, 3:3],
+            TracerConcentrations = Jutul.value(st_res[:TracerConcentrations])[:, 3:3])
+        @test Jutul.value(w.Saturations[1, 1]) == 1.0 && Jutul.value(w.Saturations[2, 1]) == 0.0
+        v = only(perforation_tracer_flux(model, r, w))
+        k = findfirst(!iszero, FD.partials(w.Saturations[1, 1]).values)
+        @test count(!iszero, FD.partials(w.Saturations[1, 1]).values) == 1
+        ds(ph) = FD.partials(w.Saturations[ph, 1])[k]
+        c_w = w.TracerConcentrations[1, 1]
+        λ_t = sum(r.PhaseMobilities[:, 1])
+        ψ = -WI*(w.Pressure[1] - r.Pressure[1])
+        @test ψ < 0 # injecting
+        # Injection: q_ph = s_w ρ_w ψ λ_t with the well concentration throughout.
+        d_inj = c_w*ψ*λ_t*sum(w.PhaseMassDensities[ph, 1]*ds(ph) for ph in 1:2)
+        # What branching on the flux gave: phase 2 has value(q) == -0.0, so it
+        # fell through to the reservoir concentration.
+        d_mixed = ψ*λ_t*(c_w*w.PhaseMassDensities[1, 1]*ds(1)
+            + r.SurfactantPartition[2, 1]*w.PhaseMassDensities[2, 1]*ds(2))
+        @test abs(d_inj - d_mixed) > 0.1*abs(d_mixed)
+        # The value is the same either way, only the derivative separates them.
+        v_expected = c_w*ψ*λ_t*Jutul.value(w.Saturations[1, 1])*w.PhaseMassDensities[1, 1]
+        @test abs(FD.value(v) - v_expected) <= 1e-12*abs(v_expected)
+        @test abs(FD.partials(v, k) - d_inj) <= 1e-12*abs(d_mixed)
     end
 end
 
